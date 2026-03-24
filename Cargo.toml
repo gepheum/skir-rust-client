@@ -1,6 +1,6 @@
 [package]
 name = "skir-client"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Runtime library for Skir-generated Rust code"
 license = "MIT"
@@ -15,4 +15,4 @@ categories = ["encoding", "network-programming"]
 anyhow = "1"
 serde_json = { version = "1", features = ["preserve_order"] }
 thiserror = "2"
-ureq = "2"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }

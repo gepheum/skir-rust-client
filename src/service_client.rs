@@ -27,13 +27,15 @@ pub struct RpcError {
 ///
 /// ```no_run
 /// # use skir_client::service_client::ServiceClient;
+/// # async fn example() {
 /// let client = ServiceClient::new("http://localhost:8787/myapi").unwrap();
-/// // let resp = client.invoke_remote(my_method, &request, &[]).unwrap();
+/// // let resp = client.invoke_remote(my_method, &request, &[]).await.unwrap();
+/// # }
 /// ```
 pub struct ServiceClient {
     service_url: String,
     default_headers: Vec<(String, String)>,
-    http_client: ureq::Agent,
+    http_client: reqwest::Client,
 }
 
 impl ServiceClient {
@@ -50,7 +52,7 @@ impl ServiceClient {
         Ok(Self {
             service_url: url,
             default_headers: Vec::new(),
-            http_client: ureq::AgentBuilder::new().build(),
+            http_client: reqwest::Client::new(),
         })
     }
 
@@ -74,7 +76,25 @@ impl ServiceClient {
     ///
     /// Returns [`RpcError`] if the server responds with a non-2xx status code
     /// or if a network-level failure occurs.
-    pub fn invoke_remote<Req, Resp>(
+    ///
+    /// # Calling from synchronous code
+    ///
+    /// If you need to call this from a synchronous context, spin up a
+    /// single-threaded Tokio runtime yourself:
+    ///
+    /// ```ignore
+    /// # use skir_client::service_client::ServiceClient;
+    /// # fn example() {
+    /// # let client = ServiceClient::new("http://localhost:8787/myapi").unwrap();
+    /// # let (method, request) = todo!();
+    /// let result = tokio::runtime::Builder::new_current_thread()
+    ///     .enable_all()
+    ///     .build()
+    ///     .unwrap()
+    ///     .block_on(client.invoke_remote(method, &request, &[]));
+    /// # }
+    /// ```
+    pub async fn invoke_remote<Req, Resp>(
         &self,
         method: &Method<Req, Resp>,
         request: &Req,
@@ -91,49 +111,56 @@ impl ServiceClient {
 
         // Wire body: "MethodName:number::requestJson"
         // The empty third field means the server may reply in dense JSON.
-        let body = format!("{}:{}::{}", method.name, method.number, request_json);
+        let wire_body = format!("{}:{}::{}", method.name, method.number, request_json);
 
-        let mut req = self
+        let mut req_builder = self
             .http_client
             .post(&self.service_url)
-            .set("Content-Type", "text/plain; charset=utf-8");
+            .header("Content-Type", "text/plain; charset=utf-8");
         for (k, v) in &self.default_headers {
-            req = req.set(k, v);
+            req_builder = req_builder.header(k.as_str(), v.as_str());
         }
         for &(k, v) in extra_headers {
-            req = req.set(k, v);
+            req_builder = req_builder.header(k, v);
         }
 
-        let resp = req.send_string(&body).map_err(|e| match e {
-            ureq::Error::Status(status_code, resp) => {
-                let message = if resp
-                    .header("content-type")
-                    .map(|ct| ct.contains("text/plain"))
-                    .unwrap_or(false)
-                {
-                    resp.into_string().unwrap_or_default()
-                } else {
-                    String::new()
-                };
-                RpcError {
-                    status_code,
-                    message,
-                }
-            }
-            ureq::Error::Transport(t) => RpcError {
-                status_code: 0,
-                message: t.to_string(),
-            },
-        })?;
+        let resp = req_builder
+            .body(wire_body)
+            .send()
+            .await
+            .map_err(|e| RpcError {
+                status_code: e.status().map(|s| s.as_u16()).unwrap_or(0),
+                message: e.to_string(),
+            })?;
 
-        let json_code = resp.into_string().map_err(|e| RpcError {
+        let status = resp.status();
+        if !status.is_success() {
+            let status_code = status.as_u16();
+            let message = if resp
+                .headers()
+                .get("content-type")
+                .and_then(|ct| ct.to_str().ok())
+                .map(|ct| ct.contains("text/plain"))
+                .unwrap_or(false)
+            {
+                resp.text().await.unwrap_or_default()
+            } else {
+                String::new()
+            };
+            return Err(RpcError {
+                status_code,
+                message,
+            });
+        }
+
+        let resp_body = resp.text().await.map_err(|e| RpcError {
             status_code: 0,
             message: format!("failed to read response body: {e}"),
         })?;
 
         method
             .response_serializer
-            .from_json(&json_code, UnrecognizedValues::Keep)
+            .from_json(&resp_body, UnrecognizedValues::Keep)
             .map_err(|e| RpcError {
                 status_code: 0,
                 message: format!("failed to decode response: {e}"),
