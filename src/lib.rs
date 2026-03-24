@@ -64,6 +64,7 @@ pub mod internal {
 
     // enum_adapter::internal
     pub use super::serializers::internal::recursive_serializer;
+    pub use super::serializers::internal::option_box_serializer;
 
     // struct_adapter::internal
     pub use super::struct_adapter::internal::struct_serializer_from_static;

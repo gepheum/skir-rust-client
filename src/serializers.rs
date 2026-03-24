@@ -95,7 +95,7 @@ impl<T: 'static> Serializer<Option<T>> {
 }
 
 pub mod internal {
-    use super::{RecursiveAdapter, Serializer};
+    use super::{OptionBoxAdapter, RecursiveAdapter, Serializer};
 
     /// Returns a [`Serializer`] for hard-recursive optional fields.
     ///
@@ -103,6 +103,13 @@ pub mod internal {
     /// so the getter can return `&Option<Box<T>>` directly without cloning.
     pub fn recursive_serializer<T: 'static>(other: Serializer<T>) -> Serializer<Option<Box<T>>> {
         Serializer::new(RecursiveAdapter { other })
+    }
+
+    /// Returns a [`Serializer`] for `Option<Box<T>>` fields that use the
+    /// standard optional encoding (`null` / wire `0xff` for absent), rather
+    /// than the recursive-struct encoding used by [`recursive_serializer`].
+    pub fn option_box_serializer<T: 'static>(other: Serializer<T>) -> Serializer<Option<Box<T>>> {
+        Serializer::new(OptionBoxAdapter { other })
     }
 }
 
@@ -1380,6 +1387,84 @@ impl<T: 'static> TypeAdapter<Option<Box<T>>> for RecursiveAdapter<T> {
 
     fn clone_box(&self) -> Box<dyn TypeAdapter<Option<Box<T>>>> {
         Box::new(RecursiveAdapter {
+            other: self.other.clone(),
+        })
+    }
+}
+
+// =============================================================================
+// OptionBoxAdapter
+// =============================================================================
+
+/// Serializer for optional fields stored as `Option<Box<T>>`.
+///
+/// Behaves exactly like [`OptionalAdapter`]: `None` encodes as JSON `null` /
+/// wire `0xff` (`255`), and `Some(v)` delegates to the inner serializer.
+/// The values are wrapped in [`Box`] to allow use in recursive struct fields
+/// where the caller manages the boxing, unlike [`RecursiveAdapter`] which uses
+/// a different absent sentinel (`[]` / `0xf6`).
+pub(crate) struct OptionBoxAdapter<T: 'static> {
+    other: Serializer<T>,
+}
+
+impl<T: 'static> TypeAdapter<Option<Box<T>>> for OptionBoxAdapter<T> {
+    fn is_default(&self, input: &Option<Box<T>>) -> bool {
+        input.is_none()
+    }
+
+    // None → JSON `null`; Some(v) → delegate to inner adapter.
+    fn to_json(&self, input: &Option<Box<T>>, eol_indent: Option<&str>, out: &mut String) {
+        match input {
+            None => out.push_str("null"),
+            Some(b) => self.other.adapter().to_json(b, eol_indent, out),
+        }
+    }
+
+    fn from_json(
+        &self,
+        json: &serde_json::Value,
+        keep_unrecognized_values: bool,
+    ) -> Result<Option<Box<T>>, String> {
+        if json.is_null() {
+            return Ok(None);
+        }
+        self.other
+            .adapter()
+            .from_json(json, keep_unrecognized_values)
+            .map(|v| Some(Box::new(v)))
+    }
+
+    // None → wire 255; Some(v) → delegate (inner writes its own wire byte).
+    fn encode(&self, input: &Option<Box<T>>, out: &mut Vec<u8>) {
+        match input {
+            None => out.push(255),
+            Some(b) => self.other.adapter().encode(b, out),
+        }
+    }
+
+    // Peek at the next byte: 255 → consume it and return None;
+    // otherwise let the inner adapter read normally.
+    fn decode(
+        &self,
+        input: &mut &[u8],
+        keep_unrecognized_values: bool,
+    ) -> Result<Option<Box<T>>, String> {
+        if input.first() == Some(&255) {
+            *input = &input[1..];
+            return Ok(None);
+        }
+        self.other
+            .adapter()
+            .decode(input, keep_unrecognized_values)
+            .map(|v| Some(Box::new(v)))
+    }
+
+    fn type_descriptor(&self) -> TypeDescriptor {
+        TypeDescriptor::Optional(Box::new(self.other.adapter().type_descriptor()))
+    }
+
+    fn clone_box(&self) -> Box<dyn TypeAdapter<Option<Box<T>>>> {
+        Box::new(OptionBoxAdapter {
             other: self.other.clone(),
         })
     }
