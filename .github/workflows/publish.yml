@@ -1,3 +1,4 @@
+# Or run locally: cargo publish
 name: Publish to crates.io
 
 on:
