@@ -21,7 +21,7 @@ pub struct RpcError {
 // ServiceClient
 // =============================================================================
 
-/// Sends RPCs to a Skir service.
+/// Sends RPCs to a SkirRPC service.
 ///
 /// # Example
 ///

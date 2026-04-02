@@ -1,6 +1,6 @@
 use super::serializer::Serializer;
 
-/// Identifies one method in a Skir service.
+/// Identifies one method in a SkirRPC service.
 ///
 /// - `Request` is the type of the request parameter.
 /// - `Response` is the type of the response returned by this method.
