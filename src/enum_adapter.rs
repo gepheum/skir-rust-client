@@ -11,7 +11,9 @@ pub mod internal {
         decode_number, decode_number_body, encode_uint32, read_u8, skip_value,
         write_json_escaped_string,
     };
-    use super::super::unrecognized::{UnrecognizedFormat, UnrecognizedVariantData};
+    use super::super::unrecognized::{
+        UnrecognizedFormat, UnrecognizedVariant, UnrecognizedVariantData,
+    };
 
     // =============================================================================
     // AnyEntry – maps a variant number to how it should be handled
@@ -35,6 +37,9 @@ pub mod internal {
         fn encode_value(&self, frozen: &T, out: &mut Vec<u8>);
         fn wrap_from_json(&self, v: &serde_json::Value, keep: bool) -> Result<T, String>;
         fn wrap_decode(&self, input: &mut &[u8], keep: bool) -> Result<T, String>;
+        fn wrap_default(&self) -> Option<T> {
+            None
+        }
     }
 
     // =============================================================================
@@ -143,6 +148,14 @@ pub mod internal {
             let inner = self.ser.adapter().decode(input, keep)?;
             Ok((self.wrap)(inner))
         }
+
+        fn wrap_default(&self) -> Option<T> {
+            self.ser
+                .adapter()
+                .from_json(&serde_json::Value::from(0), false)
+                .ok()
+                .map(self.wrap)
+        }
     }
 
     // =============================================================================
@@ -161,7 +174,7 @@ pub mod internal {
     /// [`EnumAdapter::finalize`].
     pub struct EnumAdapter<T: 'static + Default> {
         get_kind_ordinal: fn(&T) -> usize,
-        wrap_unrecognized: fn(Box<UnrecognizedVariantData<T>>) -> T,
+        wrap_unrecognized: fn(UnrecognizedVariant<T>) -> T,
         get_unrecognized: fn(&T) -> Option<&UnrecognizedVariantData<T>>,
         /// Maps variant number → how to handle it (removed / constant / wrapper).
         number_to_entry: HashMap<i32, AnyEntry>,
@@ -181,7 +194,7 @@ pub mod internal {
         /// Creates a new `EnumAdapter`.
         pub fn new(
             get_kind_ordinal: fn(&T) -> usize,
-            wrap_unrecognized: fn(Box<UnrecognizedVariantData<T>>) -> T,
+            wrap_unrecognized: fn(UnrecognizedVariant<T>) -> T,
             get_unrecognized: fn(&T) -> Option<&UnrecognizedVariantData<T>>,
             module_path: &str,
             qualified_name: &str,
@@ -329,10 +342,17 @@ pub mod internal {
                 out.push_str("\"UNKNOWN\"");
                 return;
             }
-            // Dense: emit stored JSON if available, else fall back to "0".
+            // Dense: emit stored JSON if available. For byte-preserved unknown
+            // enum variants, emit the stored variant number.
             if let Some(u) = (self.get_unrecognized)(input) {
                 if u.format == UnrecognizedFormat::DenseJson && !u.value.is_empty() {
                     out.push_str(std::str::from_utf8(&u.value).unwrap_or("0"));
+                    return;
+                }
+                if u.format == UnrecognizedFormat::Bytes
+                    && self.number_to_entry.contains_key(&u.number)
+                {
+                    out.push_str(&u.number.to_string());
                     return;
                 }
             }
@@ -378,10 +398,13 @@ pub mod internal {
                             }
                         }
                         Some(AnyEntry::Removed) => Ok(T::default()),
-                        Some(AnyEntry::Constant(_)) => Err(format!(
-                            "variant number {} is a constant, not a wrapper",
-                            num
-                        )),
+                        Some(AnyEntry::Constant(ko)) => {
+                            if let Some(Some(entry)) = self.kind_ordinal_to_entry.get(*ko) {
+                                Ok(entry.constant().unwrap_or_default())
+                            } else {
+                                Ok(T::default())
+                            }
+                        }
                         Some(AnyEntry::Wrapper(ko)) => {
                             let ko = *ko;
                             if let Some(Some(entry)) = self.kind_ordinal_to_entry.get(ko) {
@@ -400,10 +423,7 @@ pub mod internal {
                         Some(&ko) => {
                             if let Some(Some(entry)) = self.kind_ordinal_to_entry.get(ko) {
                                 if entry.constant().is_some() {
-                                    return Err(format!(
-                                        "variant '{}' is a constant, not a wrapper",
-                                        name
-                                    ));
+                                    return Ok(entry.constant().unwrap_or_default());
                                 }
                                 entry.wrap_from_json(val_json, keep)
                             } else {
@@ -442,9 +462,16 @@ pub mod internal {
                     }
                 }
                 Some(AnyEntry::Removed) => T::default(),
-                // A wrapper variant encountered in a constant context is an error;
-                // return UNKNOWN.
-                Some(AnyEntry::Wrapper(_)) => T::default(),
+                // A wrapper variant encountered in a constant context is decoded
+                // as the wrapper's default payload value.
+                Some(AnyEntry::Wrapper(ko)) => {
+                    let ko = *ko;
+                    if let Some(Some(entry)) = self.kind_ordinal_to_entry.get(ko) {
+                        entry.wrap_default().unwrap_or_default()
+                    } else {
+                        T::default()
+                    }
+                }
                 Some(AnyEntry::Constant(ko)) => {
                     let ko = *ko;
                     if let Some(Some(entry)) = self.kind_ordinal_to_entry.get(ko) {
@@ -471,8 +498,7 @@ pub mod internal {
             }
             if let Some(Some(entry)) = self.kind_ordinal_to_entry.get(ko) {
                 if entry.constant().is_some() {
-                    // Constant variant: encoded as a variable-length uint32.
-                    encode_uint32(entry.number() as u32, out);
+                    entry.encode_value(input, out);
                 } else {
                     // Wrapper variant: header byte(s) followed by the wrapped value.
                     let n = entry.number();
@@ -523,9 +549,8 @@ pub mod internal {
                     skip_value(input)?;
                     Ok(T::default())
                 }
-                // Not found or unexpectedly maps to a constant: treat as an
-                // unrecognized wrapper number.
-                None | Some(AnyEntry::Constant(_)) => {
+                // Not found: treat as an unrecognized wrapper number.
+                None => {
                     if keep {
                         // Re-encode the header we already consumed so the full wire
                         // representation can be round-tripped.
@@ -545,6 +570,16 @@ pub mod internal {
                         Ok((self.wrap_unrecognized)(
                             UnrecognizedVariantData::new_from_bytes(number, all_bytes),
                         ))
+                    } else {
+                        skip_value(input)?;
+                        Ok(T::default())
+                    }
+                }
+                Some(AnyEntry::Constant(ko)) => {
+                    let ko = *ko;
+                    if let Some(Some(entry)) = self.kind_ordinal_to_entry.get(ko) {
+                        skip_value(input)?;
+                        Ok(entry.constant().unwrap_or_default())
                     } else {
                         skip_value(input)?;
                         Ok(T::default())
