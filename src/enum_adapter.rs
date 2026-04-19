@@ -235,6 +235,14 @@ pub mod internal {
                 .insert(number, AnyEntry::Constant(kind_ordinal));
             self.name_to_kind_ordinal
                 .insert(name.to_string(), kind_ordinal);
+            let name_upper = name.to_uppercase();
+            if name_upper != name {
+                self.name_to_kind_ordinal.insert(name_upper, kind_ordinal);
+            }
+            let name_lower = name.to_lowercase();
+            if name_lower != name {
+                self.name_to_kind_ordinal.insert(name_lower, kind_ordinal);
+            }
             let entry: Box<dyn VariantEntry<T>> = Box::new(ConstantEntry {
                 name: name.to_string(),
                 number,
@@ -635,3 +643,91 @@ pub mod internal {
         Serializer::new_borrowed(adapter)
     }
 } // pub mod internal
+
+#[cfg(test)]
+mod tests {
+    use super::super::serializer::TypeAdapter;
+    use super::super::unrecognized::UnrecognizedVariant;
+    use super::internal::EnumAdapter;
+
+    // ─── Test enum type ───────────────────────────────────────────────────────
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Color {
+        Unknown(Option<UnrecognizedVariant<Color>>),
+        Red,
+        Green,
+        Blue,
+    }
+
+    impl Default for Color {
+        fn default() -> Self {
+            Color::Unknown(None)
+        }
+    }
+
+    fn make_color_adapter() -> EnumAdapter<Color> {
+        let mut adapter = EnumAdapter::new(
+            |x: &Color| match x {
+                Color::Unknown(_) => 0,
+                Color::Red => 1,
+                Color::Green => 2,
+                Color::Blue => 3,
+            },
+            |u| Color::Unknown(Some(u)),
+            |x: &Color| match x {
+                Color::Unknown(Some(u)) => Some(u.as_ref()),
+                _ => None,
+            },
+            "test.skir",
+            "Color",
+            "",
+        );
+        adapter.add_constant_variant("red", 1, 1, "", Color::Red);
+        adapter.add_constant_variant("green", 2, 2, "", Color::Green);
+        adapter.add_constant_variant("blue", 3, 3, "", Color::Blue);
+        adapter.finalize();
+        adapter
+    }
+
+    // ─── Condition 1: serialise using the registered (lower_case) name ────────
+
+    #[test]
+    fn serialises_lowercase_constant_to_lower_case_readable_json() {
+        let adapter = make_color_adapter();
+        let mut out = String::new();
+        adapter.to_json(&Color::Red, Some(""), &mut out);
+        assert_eq!(out, "\"red\"");
+    }
+
+    // ─── Condition 2: parse both UPPER_CASE and lower_case names ─────────────
+
+    #[test]
+    fn parses_upper_case_constant_name() {
+        let adapter = make_color_adapter();
+        let json = serde_json::Value::String("RED".to_string());
+        let result = adapter.from_json(&json, false).unwrap();
+        assert_eq!(result, Color::Red);
+    }
+
+    #[test]
+    fn parses_lower_case_constant_name() {
+        let adapter = make_color_adapter();
+        let json = serde_json::Value::String("green".to_string());
+        let result = adapter.from_json(&json, false).unwrap();
+        assert_eq!(result, Color::Green);
+    }
+
+    #[test]
+    fn upper_case_and_lower_case_constant_names_yield_same_result() {
+        let adapter = make_color_adapter();
+        let from_upper = adapter
+            .from_json(&serde_json::Value::String("RED".to_string()), false)
+            .unwrap();
+        let from_lower = adapter
+            .from_json(&serde_json::Value::String("red".to_string()), false)
+            .unwrap();
+        assert_eq!(from_upper, from_lower);
+        assert_eq!(from_upper, Color::Red);
+    }
+}
