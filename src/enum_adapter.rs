@@ -305,6 +305,8 @@ pub mod internal {
         }
 
         pub fn finalize(&mut self) {
+            self.name_to_kind_ordinal.insert("UNKNOWN".to_string(), 0);
+            self.name_to_kind_ordinal.insert("unknown".to_string(), 0);
             self.desc_variants.sort_by_key(|v| v.number());
             let variants = std::mem::take(&mut self.desc_variants);
             self.desc.set_variants(variants);
@@ -729,5 +731,18 @@ mod tests {
             .unwrap();
         assert_eq!(from_upper, from_lower);
         assert_eq!(from_upper, Color::Red);
+    }
+
+    #[test]
+    fn unknown_upper_and_lower_yield_same_unknown_result() {
+        let adapter = make_color_adapter();
+        let from_upper = adapter
+            .from_json(&serde_json::Value::String("UNKNOWN".to_string()), false)
+            .unwrap();
+        let from_lower = adapter
+            .from_json(&serde_json::Value::String("unknown".to_string()), false)
+            .unwrap();
+        assert_eq!(from_upper, from_lower);
+        assert_eq!(from_lower, Color::Unknown(None));
     }
 }
