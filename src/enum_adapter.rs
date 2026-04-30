@@ -340,7 +340,7 @@ pub mod internal {
             } else {
                 // Fallback: shouldn't happen with well-formed generated code.
                 if eol_indent.is_some() {
-                    out.push_str("\"UNKNOWN\"");
+                    out.push_str("\"unknown\"");
                 } else {
                     out.push('0');
                 }
@@ -349,7 +349,7 @@ pub mod internal {
 
         fn unknown_to_json(&self, input: &T, eol_indent: Option<&str>, out: &mut String) {
             if eol_indent.is_some() {
-                out.push_str("\"UNKNOWN\"");
+                out.push_str("\"unknown\"");
                 return;
             }
             // Dense: emit stored JSON if available. For byte-preserved unknown
