@@ -2606,6 +2606,17 @@ mod tests {
         }
     }
 
+    #[test]
+    fn string_decode_invalid_utf8_replaced() {
+        let bytes = b"skir\xf3\x02\xffz";
+        assert_eq!(
+            Serializer::string()
+                .from_bytes(bytes, UnrecognizedValues::Drop)
+                .unwrap(),
+            "\u{FFFD}z"
+        );
+    }
+
     // =========================================================================
     // bytes_serializer
     // =========================================================================
